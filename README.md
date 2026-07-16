@@ -25,22 +25,26 @@ Keep BotFather privacy mode enabled. Telegram still delivers direct replies to t
 
 1. Create a bot with BotFather and copy its token into `TELEGRAM_BOT_TOKEN`.
 2. Add the bot to the target group. It does not need administrator permissions.
-3. Before starting this service, send a message in the group and inspect `https://api.telegram.org/bot<token>/getUpdates`. Copy `message.chat.id` into `TELEGRAM_CHAT_ID`. Supergroup IDs normally begin with `-100`.
-4. If notifications belong in a forum topic, copy `message.message_thread_id` into `TELEGRAM_MESSAGE_THREAD_ID`; otherwise leave it unset.
+3. Before starting this service, send `/start@<bot_username>` in the group. No visible reply is expected; the command only queues an update for the bot.
+4. Retrieve that update with `getUpdates`, keeping the token in a private shell variable rather than pasting it into documentation or chat. Copy the negative `message.chat.id` into `TELEGRAM_CHAT_ID`. See the [manual end-to-end test](docs/e2emanualtest.md#4-create-the-telegram-test-bot-and-group) for copy-pasteable commands.
+5. If notifications belong in a forum topic, copy `message.message_thread_id` into `TELEGRAM_MESSAGE_THREAD_ID`; otherwise leave it unset.
 
 ## Configure Vikunja
 
 1. Create a dedicated Vikunja integration account and give it write access only to the selected project.
-2. Create an API token for that account with the minimum routes needed to:
-   - read the configured project;
-   - list task comments;
-   - create task comments.
+2. Create an API token for that account with exactly these permissions:
+   - **projects** → `read one`;
+   - **tasks** → `read one`;
+   - **tasks comments** → `read all`;
+   - **tasks comments** → `create`.
 3. Copy `.env.example` to `.env` and fill in the Vikunja API URL, frontend URL, token, and numeric project ID.
 4. Generate a random webhook secret, for example with `openssl rand -hex 32`, and put it in `VIKUNJA_WEBHOOK_SECRET`.
 5. In the selected project's **Settings → Webhooks**, create a webhook with:
    - target URL: `http://vikunja-telegram:3000/webhooks/vikunja`;
    - event: `task.created`;
    - secret: exactly the value of `VIKUNJA_WEBHOOK_SECRET`.
+
+Use the project's settings, not the account-level webhook screen. User webhooks only offer reminder and overdue events; `task.created` is a project webhook event.
 
 Vikunja blocks private and other non-routable webhook targets by default as SSRF protection. For a trusted, single-organization installation using the private Docker target above, set this on the Vikunja service and restart it:
 
@@ -50,7 +54,7 @@ VIKUNJA_OUTGOINGREQUESTS_ALLOWNONROUTABLEIPS=true
 
 Do not enable that option on an instance where untrusted users can create webhooks. Use Vikunja's outgoing-request proxy or expose this service through a controlled HTTPS reverse proxy instead.
 
-Configuration URLs must use HTTP or HTTPS and cannot contain credentials, query strings, or fragments. Use a dedicated Telegram bot and a least-privilege Vikunja token restricted to the configured project; replies are rejected if their task has moved to another project.
+Configuration URLs must use HTTP or HTTPS and cannot contain credentials, query strings, or fragments. `VIKUNJA_FRONTEND_URL` becomes the Telegram **Open ticket** button URL, so it must be reachable by group members and must not use `localhost`; use the production Vikunja URL, or a reachable LAN address for a disposable local test. Use a dedicated Telegram bot and a least-privilege Vikunja token restricted to the configured project; replies are rejected if their task has moved to another project.
 
 ## Run with Docker
 
@@ -62,6 +66,7 @@ The supplied Compose file joins an existing Docker network. Set `VIKUNJA_DOCKER_
 cp .env.example .env
 # Edit .env, then validate and deploy:
 docker compose config --quiet
+docker compose config --environment | grep '^VIKUNJA_DOCKER_NETWORK='
 docker compose build --pull
 docker compose up -d
 docker compose ps
@@ -107,6 +112,8 @@ npm run dev
 
 For local webhook testing, Vikunja must be able to resolve and reach the configured webhook URL.
 
+For a complete disposable Vikunja → Telegram → Vikunja verification, follow the [manual end-to-end test](docs/e2emanualtest.md).
+
 Quality checks:
 
 ```bash
@@ -121,6 +128,8 @@ npm run build
 
 - `GET /healthz` checks the HTTP process.
 - `GET /readyz` succeeds after grammY establishes its polling loop and a Vikunja project check passes. It represents startup readiness, not continuous Telegram reachability.
+- `network ... declared as external, but could not be found` means `VIKUNJA_DOCKER_NETWORK` does not exactly match an existing Docker network; hyphens and underscores are different characters.
+- A `Restarting (1)` container is crashing; inspect `docker compose logs --tail=100 --no-color vikunja-telegram`. `Up ... (healthy)` confirms HTTP liveness, after which `/readyz` must still confirm both dependencies.
 - Invalid signatures return `401`, malformed signed payloads return `400`, and Telegram delivery failures return `502`.
 - Signed webhooks must be no more than five minutes old. A bounded in-memory digest cache rejects replays during that window; restarting the process resets this cache.
 - Notification delivery is best-effort and has no local retry: Vikunja currently sends webhooks once and does not retry failures, so a Telegram outage or service restart at delivery time can lose a notification.
@@ -129,7 +138,7 @@ npm run build
 - Shutdown stops polling, waits for in-flight Telegram reply middleware, and then closes HTTP.
 - Logs are structured JSON and redact authorization headers. Tokens and webhook secrets are never logged.
 
-After deployment, create a test task in the configured project. Confirm that one Telegram notification appears with a working **Open ticket** button, then reply to it and verify the attributed comment in Vikunja.
+After deployment, create a test task in the configured project. Confirm that one Telegram notification appears with a working **Open ticket** button, then reply to it and verify the attributed comment in Vikunja. The comment ends with visible Telegram attribution and a `Telegram reference: [[vikunja-telegram|...]]` line used for stateless idempotency.
 
 ## Deliberate limitations
 
