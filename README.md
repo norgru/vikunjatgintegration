@@ -54,17 +54,49 @@ Configuration URLs must use HTTP or HTTPS and cannot contain credentials, query 
 
 ## Run with Docker
 
-The supplied Compose file joins an existing Docker network. Set `VIKUNJA_DOCKER_NETWORK` to the actual network containing Vikunja; `docker network ls` will show the available names.
+Deploy from the complete repository, not from the `Dockerfile` alone: the image build copies the package files, TypeScript configuration, build script, and `src/`. Node.js is not required on the deployment host because the multi-stage Docker build installs dependencies and compiles the application inside the build container.
+
+The supplied Compose file joins an existing Docker network. Set `VIKUNJA_DOCKER_NETWORK` to the actual network containing Vikunja; `docker network ls` will show the available names. Keep `PORT=3000`: the supplied Compose healthcheck and the documented Vikunja webhook target both use that port. Transfer secrets separately from the repository and create `.env` directly on the deployment host.
 
 ```bash
 cp .env.example .env
-# Edit .env, then:
-docker compose up --build -d
+# Edit .env, then validate and deploy:
+docker compose config --quiet
+docker compose build --pull
+docker compose up -d
+docker compose ps
 docker compose logs -f vikunja-telegram
 ```
 
+If the container exits immediately, inspect `docker compose logs vikunja-telegram` for an `Invalid configuration: ...` message and correct the reported `.env` values.
+
 No host port is published. Vikunja reaches the webhook over their shared Docker network, and the service makes outbound HTTPS requests to Telegram.
 The container is stateless: it has no application volume to create, persist, or back up.
+
+After startup, check readiness from inside the container:
+
+```bash
+docker compose exec vikunja-telegram node -e \
+  "fetch('http://127.0.0.1:3000/readyz').then(async r => console.log(r.status, await r.text()))"
+```
+
+A ready service returns HTTP `200`. A `503` response includes the Telegram and Vikunja readiness states to help identify which dependency is unavailable. The Compose healthcheck intentionally uses `/healthz`, not `/readyz`, so Docker checks whether the HTTP process is alive while temporary Telegram or Vikunja outages are reported separately through readiness.
+
+## Update a Docker deployment
+
+Replace or pull the complete repository source while preserving the host's `.env`, then rebuild and replace the container:
+
+```bash
+docker compose config --quiet
+docker compose build --pull
+docker compose up -d
+docker compose ps
+docker compose logs --tail=100 vikunja-telegram
+```
+
+There is no application data migration or volume backup step because the service does not persist local state.
+
+To roll back, restore the previous known-good commit, tag, or source archive without replacing the host's `.env`, then run the same validation, build, and deployment commands above. Confirm readiness and the expected version's behavior before discarding the newer source.
 
 ## Local development
 
