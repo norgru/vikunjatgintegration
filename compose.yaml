@@ -2,6 +2,16 @@ services:
   vikunja-telegram:
     build: .
     restart: unless-stopped
+    init: true
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    mem_limit: 128m
+    cpus: 0.50
     env_file: .env
     networks:
       - vikunja

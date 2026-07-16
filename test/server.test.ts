@@ -21,7 +21,10 @@ describe('webhook server', () => {
   it('delivers a valid task.created event directly', async () => {
     const { config, handleWebhook, app } = setup();
     const body = JSON.stringify(webhookPayload());
-    const headers = { 'content-type': 'application/json', 'x-vikunja-signature': sign(body, config.vikunjaWebhookSecret) };
+    const headers = {
+      'content-type': 'application/json',
+      'x-vikunja-signature': sign(body, config.vikunjaWebhookSecret),
+    };
 
     const first = await app.inject({ method: 'POST', url: '/webhooks/vikunja', headers, payload: body });
     expect(first.statusCode).toBe(202);
@@ -51,6 +54,76 @@ describe('webhook server', () => {
     });
     expect(unauthorized.statusCode).toBe(401);
     expect(malformed.statusCode).toBe(400);
+
+    const invalidJson = '{';
+    const invalidJsonResponse = await app.inject({
+      method: 'POST',
+      url: '/webhooks/vikunja',
+      headers: {
+        'content-type': 'application/json',
+        'x-vikunja-signature': sign(invalidJson, config.vikunjaWebhookSecret),
+      },
+      payload: invalidJson,
+    });
+    expect(invalidJsonResponse.statusCode).toBe(400);
+  });
+
+  it('rejects stale and replayed signed webhooks', async () => {
+    const { config, app } = setup();
+    const body = JSON.stringify(webhookPayload());
+    const headers = {
+      'content-type': 'application/json',
+      'x-vikunja-signature': sign(body, config.vikunjaWebhookSecret),
+    };
+    expect((await app.inject({ method: 'POST', url: '/webhooks/vikunja', headers, payload: body })).statusCode).toBe(
+      202,
+    );
+    expect((await app.inject({ method: 'POST', url: '/webhooks/vikunja', headers, payload: body })).statusCode).toBe(
+      409,
+    );
+
+    const staleBody = JSON.stringify(webhookPayload({ time: '2020-01-01T00:00:00Z' }));
+    const stale = await app.inject({
+      method: 'POST',
+      url: '/webhooks/vikunja',
+      headers: {
+        'content-type': 'application/json',
+        'x-vikunja-signature': sign(staleBody, config.vikunjaWebhookSecret),
+      },
+      payload: staleBody,
+    });
+    expect(stale.statusCode).toBe(400);
+    expect(stale.json()).toEqual({ error: 'Stale webhook' });
+  });
+
+  it('rejects wrong projects and oversized bodies', async () => {
+    const { config, handleWebhook, app } = setup();
+    const wrongProjectPayload = webhookPayload();
+    (wrongProjectPayload.data as { task: { project_id: number } }).task.project_id = 99;
+    const wrongProjectBody = JSON.stringify(wrongProjectPayload);
+    const wrongProject = await app.inject({
+      method: 'POST',
+      url: '/webhooks/vikunja',
+      headers: {
+        'content-type': 'application/json',
+        'x-vikunja-signature': sign(wrongProjectBody, config.vikunjaWebhookSecret),
+      },
+      payload: wrongProjectBody,
+    });
+    expect(wrongProject.statusCode).toBe(202);
+    expect(handleWebhook).not.toHaveBeenCalled();
+
+    const oversized = JSON.stringify({ padding: 'x'.repeat(1_048_576) });
+    const oversizedResponse = await app.inject({
+      method: 'POST',
+      url: '/webhooks/vikunja',
+      headers: {
+        'content-type': 'application/json',
+        'x-vikunja-signature': sign(oversized, config.vikunjaWebhookSecret),
+      },
+      payload: oversized,
+    });
+    expect(oversizedResponse.statusCode).toBe(413);
   });
 
   it('acknowledges but ignores other projects and events', async () => {
@@ -81,6 +154,16 @@ describe('webhook server', () => {
     });
     expect(response.statusCode).toBe(502);
     expect(response.json()).toEqual({ error: 'Telegram notification delivery failed' });
+    const retry = await app.inject({
+      method: 'POST',
+      url: '/webhooks/vikunja',
+      headers: {
+        'content-type': 'application/json',
+        'x-vikunja-signature': sign(body, config.vikunjaWebhookSecret),
+      },
+      payload: body,
+    });
+    expect(retry.statusCode).toBe(502);
   });
 
   it('reports liveness and readiness separately', async () => {

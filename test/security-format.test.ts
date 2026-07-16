@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   formatTicketNotification,
   formatVikunjaComment,
+  hasTelegramCommentMarker,
   taskIdFromTicketUrl,
   telegramCommentMarker,
   ticketNotificationFromWebhook,
@@ -26,7 +27,6 @@ describe('Vikunja webhook security', () => {
     expect(verifyVikunjaSignature(body, 'not-hex', 'secret')).toBe(false);
     expect(verifyVikunjaSignature(body, '0'.repeat(64), 'secret')).toBe(false);
   });
-
 });
 
 describe('message formatting', () => {
@@ -51,13 +51,25 @@ describe('message formatting', () => {
     };
     expect(formatVikunjaComment(reply)).toContain('Telegram: Norman Example (@norman)');
     expect(formatVikunjaComment(reply)).toContain(telegramCommentMarker(reply));
+    expect(hasTelegramCommentMarker(formatVikunjaComment(reply), telegramCommentMarker(reply))).toBe(true);
+  });
+
+  it('does not confuse marker prefixes or marker-like user text with metadata', () => {
+    const shortMarker = '[[vikunja-telegram|-100|12]]';
+    expect(hasTelegramCommentMarker('Comment\nTelegram reference: [[vikunja-telegram|-100|123]]', shortMarker)).toBe(
+      false,
+    );
+    expect(hasTelegramCommentMarker(`User typed ${shortMarker}`, shortMarker)).toBe(false);
+    expect(hasTelegramCommentMarker(`Comment\nTelegram reference: ${shortMarker}`, shortMarker)).toBe(true);
   });
 
   it('extracts task IDs only from the configured Vikunja frontend', () => {
     expect(taskIdFromTicketUrl('https://vikunja.example/tasks/123', 'https://vikunja.example')).toBe(123);
     expect(taskIdFromTicketUrl('https://vikunja.example/base/tasks/456', 'https://vikunja.example/base')).toBe(456);
     expect(taskIdFromTicketUrl('https://attacker.example/tasks/123', 'https://vikunja.example')).toBeUndefined();
-    expect(taskIdFromTicketUrl('https://vikunja.example/tasks/not-a-number', 'https://vikunja.example')).toBeUndefined();
+    expect(
+      taskIdFromTicketUrl('https://vikunja.example/tasks/not-a-number', 'https://vikunja.example'),
+    ).toBeUndefined();
     expect(taskIdFromTicketUrl('https://vikunja.example/tasks/123/extra', 'https://vikunja.example')).toBeUndefined();
   });
 

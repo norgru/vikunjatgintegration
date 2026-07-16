@@ -36,16 +36,21 @@ export function ticketNotificationFromWebhook(payload: VikunjaWebhook, frontendU
 function formatDueDate(value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
-  return new Intl.DateTimeFormat('en-GB', {
-    dateStyle: 'medium',
-    timeStyle: 'short',
-    timeZone: 'UTC',
-  }).format(date) + ' UTC';
+  return (
+    new Intl.DateTimeFormat('en-GB', {
+      dateStyle: 'medium',
+      timeStyle: 'short',
+      timeZone: 'UTC',
+    }).format(date) + ' UTC'
+  );
 }
 
 export function formatTicketNotification(ticket: TicketNotification): string {
   const heading = ticket.identifier ? `New ticket · ${truncate(ticket.identifier, 100)}` : 'New ticket';
-  const lines = [`🆕 <b>${escapeTelegramHtml(heading)}</b>`, `<b>${escapeTelegramHtml(truncate(ticket.title, 2_000))}</b>`];
+  const lines = [
+    `🆕 <b>${escapeTelegramHtml(heading)}</b>`,
+    `<b>${escapeTelegramHtml(truncate(ticket.title, 2_000))}</b>`,
+  ];
   if (ticket.creator) lines.push(`Created by: ${escapeTelegramHtml(truncate(ticket.creator, 250))}`);
   if (ticket.assignees.length > 0) {
     lines.push(`Assigned to: ${escapeTelegramHtml(truncate(ticket.assignees.join(', '), 1_000))}`);
@@ -74,10 +79,15 @@ export function taskIdFromTicketUrl(candidateUrl: string, frontendUrl: string): 
 }
 
 export function telegramCommentMarker(reply: Pick<TelegramReply, 'chatId' | 'messageId'>): string {
-  return `tg:${reply.chatId}:${reply.messageId}`;
+  return `[[vikunja-telegram|${reply.chatId}|${reply.messageId}]]`;
+}
+
+export function hasTelegramCommentMarker(comment: string, marker: string): boolean {
+  const finalLine = comment.trimEnd().split(/\r?\n/).at(-1);
+  return finalLine === `Telegram reference: ${marker}`;
 }
 
 export function formatVikunjaComment(reply: TelegramReply): string {
   const username = reply.authorUsername ? ` (@${reply.authorUsername})` : '';
-  return `${reply.text.trim()}\n\n— Telegram: ${reply.authorName}${username} · ref ${telegramCommentMarker(reply)}`;
+  return `${reply.text.trim()}\n\n— Telegram: ${reply.authorName}${username}\nTelegram reference: ${telegramCommentMarker(reply)}`;
 }

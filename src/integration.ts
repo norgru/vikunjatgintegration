@@ -1,8 +1,13 @@
 import type { TelegramReply, VikunjaWebhook } from './domain.js';
-import { formatVikunjaComment, telegramCommentMarker, ticketNotificationFromWebhook } from './format.js';
+import {
+  formatVikunjaComment,
+  hasTelegramCommentMarker,
+  telegramCommentMarker,
+  ticketNotificationFromWebhook,
+} from './format.js';
 import type { AppLogger } from './logger.js';
 import type { TelegramGateway } from './telegram.js';
-import type { VikunjaGateway } from './vikunja.js';
+import { isRetryableVikunjaError, type VikunjaGateway } from './vikunja.js';
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message.slice(0, 1_000) : String(error).slice(0, 1_000);
@@ -13,6 +18,7 @@ export class StatelessIntegration {
     private readonly telegram: TelegramGateway,
     private readonly vikunja: VikunjaGateway,
     private readonly frontendUrl: string,
+    private readonly projectId: number,
     private readonly logger: AppLogger,
     private readonly commentRetryDelaysMs: readonly number[] = [1_000, 2_000],
   ) {}
@@ -30,15 +36,22 @@ export class StatelessIntegration {
 
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
       try {
+        const taskProjectId = await this.vikunja.getTaskProjectId(reply.taskId);
+        if (taskProjectId !== this.projectId) {
+          throw new Error(`Task ${reply.taskId} does not belong to configured project ${this.projectId}`);
+        }
         const comments = await this.vikunja.listComments(reply.taskId);
-        if (!comments.some((existing) => existing.comment.includes(marker))) {
+        if (!comments.some((existing) => hasTelegramCommentMarker(existing.comment, marker))) {
           await this.vikunja.createComment(reply.taskId, comment);
         }
         await this.acknowledgeComment(reply);
-        this.logger.info({ taskId: reply.taskId, telegramMessageId: reply.messageId }, 'Telegram reply added to Vikunja');
+        this.logger.info(
+          { taskId: reply.taskId, telegramMessageId: reply.messageId },
+          'Telegram reply added to Vikunja',
+        );
         return;
       } catch (error) {
-        if (attempt === attempts) {
+        if (attempt === attempts || !isRetryableVikunjaError(error)) {
           await this.reportCommentFailure(reply, error);
           return;
         }
@@ -56,7 +69,10 @@ export class StatelessIntegration {
     try {
       await this.telegram.acknowledgeComment(reply.chatId, reply.messageId);
     } catch (error) {
-      this.logger.debug({ error: errorMessage(error), updateId: reply.updateId }, 'Could not acknowledge Telegram comment');
+      this.logger.debug(
+        { error: errorMessage(error), updateId: reply.updateId },
+        'Could not acknowledge Telegram comment',
+      );
     }
   }
 
@@ -66,7 +82,7 @@ export class StatelessIntegration {
       'Vikunja comment failed permanently',
     );
     try {
-      await this.telegram.reportCommentFailure(reply.chatId, reply.messageId);
+      await this.telegram.reportCommentFailure(reply.chatId, reply.messageId, reply.messageThreadId);
     } catch (telegramError) {
       this.logger.error(
         { updateId: reply.updateId, error: errorMessage(telegramError) },

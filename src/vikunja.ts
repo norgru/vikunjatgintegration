@@ -1,7 +1,29 @@
+import { z } from 'zod';
 import type { TaskComment } from './domain.js';
+
+const commentSchema = z.object({ id: z.number().int(), comment: z.string() });
+const commentsSchema = z.array(commentSchema);
+const taskSchema = z.object({ project_id: z.number().int().positive() });
+
+export class VikunjaError extends Error {
+  constructor(
+    message: string,
+    readonly status: number | undefined,
+    readonly retryable: boolean,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+    this.name = 'VikunjaError';
+  }
+}
+
+export function isRetryableVikunjaError(error: unknown): boolean {
+  return error instanceof VikunjaError && error.retryable;
+}
 
 export interface VikunjaGateway {
   checkProject(projectId: number): Promise<void>;
+  getTaskProjectId(taskId: number): Promise<number>;
   listComments(taskId: number): Promise<TaskComment[]>;
   createComment(taskId: number, comment: string): Promise<void>;
 }
@@ -14,19 +36,36 @@ export class VikunjaClient implements VikunjaGateway {
   ) {}
 
   private async request(path: string, init: RequestInit = {}): Promise<Response> {
-    const response = await fetch(`${this.apiUrl}${path}`, {
-      ...init,
-      headers: {
-        Accept: 'application/json',
-        Authorization: `Bearer ${this.apiToken}`,
-        ...(init.body ? { 'Content-Type': 'application/json' } : {}),
-        ...init.headers,
-      },
-      signal: AbortSignal.timeout(this.timeoutMs),
-    });
+    let response: Response;
+    try {
+      response = await fetch(`${this.apiUrl}${path}`, {
+        ...init,
+        headers: {
+          Accept: 'application/json',
+          Authorization: `Bearer ${this.apiToken}`,
+          ...(init.body ? { 'Content-Type': 'application/json' } : {}),
+          ...init.headers,
+        },
+        signal: AbortSignal.timeout(this.timeoutMs),
+      });
+    } catch (error) {
+      throw new VikunjaError(
+        `Vikunja ${init.method ?? 'GET'} ${path} failed before receiving a response`,
+        undefined,
+        true,
+        {
+          cause: error,
+        },
+      );
+    }
     if (!response.ok) {
       const body = (await response.text()).slice(0, 500);
-      throw new Error(`Vikunja ${init.method ?? 'GET'} ${path} failed with ${response.status}: ${body}`);
+      const retryable = response.status === 429 || response.status >= 500;
+      throw new VikunjaError(
+        `Vikunja ${init.method ?? 'GET'} ${path} failed with ${response.status}: ${body}`,
+        response.status,
+        retryable,
+      );
     }
     return response;
   }
@@ -35,21 +74,14 @@ export class VikunjaClient implements VikunjaGateway {
     await this.request(`/projects/${projectId}`);
   }
 
+  async getTaskProjectId(taskId: number): Promise<number> {
+    const response = await this.request(`/tasks/${taskId}`);
+    return taskSchema.parse(await response.json()).project_id;
+  }
+
   async listComments(taskId: number): Promise<TaskComment[]> {
     const response = await this.request(`/tasks/${taskId}/comments`);
-    const body: unknown = await response.json();
-    if (!Array.isArray(body)) throw new Error('Vikunja returned an invalid comments response');
-    return body.flatMap((value): TaskComment[] => {
-      if (
-        typeof value === 'object' &&
-        value !== null &&
-        typeof (value as { id?: unknown }).id === 'number' &&
-        typeof (value as { comment?: unknown }).comment === 'string'
-      ) {
-        return [{ id: (value as { id: number }).id, comment: (value as { comment: string }).comment }];
-      }
-      return [];
-    });
+    return commentsSchema.parse(await response.json());
   }
 
   async createComment(taskId: number, comment: string): Promise<void> {

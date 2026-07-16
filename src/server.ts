@@ -2,7 +2,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import type { LoggerOptions } from 'pino';
 import type { Config } from './config.js';
 import { vikunjaWebhookSchema, type VikunjaWebhook } from './domain.js';
-import { verifyVikunjaSignature } from './security.js';
+import { verifyVikunjaSignature, WebhookReplayGuard } from './security.js';
 
 export type ReadinessState = {
   telegram: boolean;
@@ -15,6 +15,7 @@ export function buildServer(
   config: Config,
   handleWebhook: WebhookHandler,
   readiness: ReadinessState = { telegram: false, vikunja: false },
+  replayGuard = new WebhookReplayGuard(),
 ): FastifyInstance {
   const logger: LoggerOptions | boolean =
     config.logLevel === 'silent' ? false : { level: config.logLevel, redact: ['req.headers.authorization'] };
@@ -22,7 +23,7 @@ export function buildServer(
 
   app.addContentTypeParser('application/json', { parseAs: 'buffer' }, (_request, body, done) => done(null, body));
 
-  app.get('/healthz', async () => ({ status: 'ok' }));
+  app.get('/healthz', () => ({ status: 'ok' }));
 
   app.get('/readyz', async (_request, reply) => {
     const ready = readiness.telegram && readiness.vikunja;
@@ -53,11 +54,20 @@ export function buildServer(
       return reply.code(202).send({ accepted: false, reason: 'Event not configured' });
     }
 
+    const replayDecision = replayGuard.reserve(rawBody, parsed.data.time);
+    if (!replayDecision.accepted) {
+      const status = replayDecision.reason === 'replay' ? 409 : 400;
+      return reply
+        .code(status)
+        .send({ error: replayDecision.reason === 'replay' ? 'Webhook replay rejected' : 'Stale webhook' });
+    }
+
     try {
       await handleWebhook(parsed.data);
       return reply.code(202).send({ accepted: true });
     } catch (error) {
-      request.log.error({ error }, 'Telegram notification delivery failed');
+      replayGuard.release(replayDecision.key);
+      request.log.error({ err: error }, 'Telegram notification delivery failed');
       return reply.code(502).send({ error: 'Telegram notification delivery failed' });
     }
   });

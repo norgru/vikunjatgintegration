@@ -3,7 +3,7 @@ import pino from 'pino';
 import type { Config } from '../src/config.js';
 import type { TelegramGateway } from '../src/telegram.js';
 import type { TaskComment, TicketNotification } from '../src/domain.js';
-import type { VikunjaGateway } from '../src/vikunja.js';
+import { VikunjaError, type VikunjaGateway } from '../src/vikunja.js';
 
 export const logger = pino({ level: 'silent' });
 
@@ -31,7 +31,7 @@ export function sign(body: string, secret: string): string {
 export function webhookPayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     event_name: 'task.created',
-    time: '2026-07-14T11:00:00Z',
+    time: new Date().toISOString(),
     data: {
       task: {
         id: 123,
@@ -50,8 +50,10 @@ export function webhookPayload(overrides: Record<string, unknown> = {}): Record<
 export class FakeTelegram implements TelegramGateway {
   readonly tickets: TicketNotification[] = [];
   readonly acknowledgements: Array<{ chatId: number; messageId: number }> = [];
-  readonly failures: Array<{ chatId: number; messageId: number }> = [];
+  readonly failures: Array<{ chatId: number; messageId: number; messageThreadId?: number }> = [];
   failTicket = false;
+  failAcknowledgement = false;
+  failFailureReport = false;
 
   async sendTicketNotification(ticket: TicketNotification): Promise<void> {
     if (this.failTicket) throw new Error('Telegram unavailable');
@@ -59,11 +61,17 @@ export class FakeTelegram implements TelegramGateway {
   }
 
   async acknowledgeComment(chatId: number, messageId: number): Promise<void> {
+    if (this.failAcknowledgement) throw new Error('Reaction unavailable');
     this.acknowledgements.push({ chatId, messageId });
   }
 
-  async reportCommentFailure(chatId: number, messageId: number): Promise<void> {
-    this.failures.push({ chatId, messageId });
+  async reportCommentFailure(chatId: number, messageId: number, messageThreadId?: number): Promise<void> {
+    if (this.failFailureReport) throw new Error('Failure report unavailable');
+    this.failures.push({
+      chatId,
+      messageId,
+      ...(messageThreadId === undefined ? {} : { messageThreadId }),
+    });
   }
 }
 
@@ -72,8 +80,15 @@ export class FakeVikunja implements VikunjaGateway {
   created: Array<{ taskId: number; comment: string }> = [];
   createAttempts = 0;
   failCreate = false;
+  createError: Error | undefined;
+  ambiguousCreateOnce = false;
+  projectId = 42;
 
   async checkProject(): Promise<void> {}
+
+  async getTaskProjectId(): Promise<number> {
+    return this.projectId;
+  }
 
   async listComments(): Promise<TaskComment[]> {
     return this.comments;
@@ -81,7 +96,13 @@ export class FakeVikunja implements VikunjaGateway {
 
   async createComment(taskId: number, comment: string): Promise<void> {
     this.createAttempts += 1;
-    if (this.failCreate) throw new Error('Vikunja unavailable');
+    if (this.createError) throw this.createError;
+    if (this.failCreate) throw new VikunjaError('Vikunja unavailable', 503, true);
     this.created.push({ taskId, comment });
+    if (this.ambiguousCreateOnce) {
+      this.ambiguousCreateOnce = false;
+      this.comments.push({ id: 999, comment });
+      throw new VikunjaError('Response lost', undefined, true);
+    }
   }
 }

@@ -50,6 +50,8 @@ VIKUNJA_OUTGOINGREQUESTS_ALLOWNONROUTABLEIPS=true
 
 Do not enable that option on an instance where untrusted users can create webhooks. Use Vikunja's outgoing-request proxy or expose this service through a controlled HTTPS reverse proxy instead.
 
+Configuration URLs must use HTTP or HTTPS and cannot contain credentials, query strings, or fragments. Use a dedicated Telegram bot and a least-privilege Vikunja token restricted to the configured project; replies are rejected if their task has moved to another project.
+
 ## Run with Docker
 
 The supplied Compose file joins an existing Docker network. Set `VIKUNJA_DOCKER_NETWORK` to the actual network containing Vikunja; `docker network ls` will show the available names.
@@ -78,17 +80,21 @@ Quality checks:
 ```bash
 npm test
 npm run typecheck
+npm run lint
+npm run format:check
 npm run build
 ```
 
 ## Operations
 
 - `GET /healthz` checks the HTTP process.
-- `GET /readyz` returns success only after Telegram initialization and a successful Vikunja project check.
+- `GET /readyz` succeeds after grammY establishes its polling loop and a Vikunja project check passes. It represents startup readiness, not continuous Telegram reachability.
 - Invalid signatures return `401`, malformed signed payloads return `400`, and Telegram delivery failures return `502`.
+- Signed webhooks must be no more than five minutes old. A bounded in-memory digest cache rejects replays during that window; restarting the process resets this cache.
 - Notification delivery is best-effort and has no local retry: Vikunja currently sends webhooks once and does not retry failures, so a Telegram outage or service restart at delivery time can lose a notification.
 - Comment delivery retries three times in memory. Before creating a comment it searches for the Telegram message marker, making a replay after an ambiguous API timeout idempotent without local storage.
 - Restarting the container discards only an in-progress retry delay; there is no stored application state to recover.
+- Shutdown stops polling, waits for in-flight Telegram reply middleware, and then closes HTTP.
 - Logs are structured JSON and redact authorization headers. Tokens and webhook secrets are never logged.
 
 After deployment, create a test task in the configured project. Confirm that one Telegram notification appears with a working **Open ticket** button, then reply to it and verify the attributed comment in Vikunja.
